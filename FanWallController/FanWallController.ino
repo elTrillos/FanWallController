@@ -1,3 +1,4 @@
+
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <EEPROM.h>
@@ -6,7 +7,9 @@
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
-const int eepromSize = 64;  // Adjust size as needed
+const int eepromSize = 64;
+const int buttonPin = 33;//WiFi credentials button pin
+bool buttonPressed = false;
 
 const char* ssid = "Trollis";
 const char* password = "123456789a";
@@ -33,6 +36,48 @@ TaskHandle_t mqttTask;
 char storedSSID[eepromSize];
 char storedPassword[eepromSize];
 
+void waitForSerialMessage() {
+  Serial.println("Waiting for serial message...");
+  while (!Serial.available()) {
+    // Wait until a serial message is available
+  }
+  // Read the serial message
+  String serialMessage = Serial.readStringUntil('/');
+  Serial.println("Received Serial Message: " + serialMessage);
+  
+  // Split the serial message into ssid and password
+  int separatorIndex = serialMessage.indexOf('/');
+  if (separatorIndex != -1) { // Check if the separator was found
+    String ssid = serialMessage.substring(0, separatorIndex);
+    String password = serialMessage.substring(separatorIndex + 1);
+    writeCredentials(ssid.c_str(), password.c_str()); // Call writeCredentials with ssid and password
+    Serial.println("Credentials written to EEPROM.");
+  } else {
+    Serial.println("Invalid serial message format.");
+  }
+}
+
+
+void checkButtonDuringSetup() {
+  // Check button state for a couple of seconds
+  unsigned long startTime = millis(); // Get the current time
+  while (millis() - startTime < 2000) { // Check for 2 seconds
+    if (digitalRead(buttonPin) == LOW) {
+      buttonPressed = true;
+      break; // Exit the loop if the button is pressed
+    }
+  }
+
+  // Print the button state after the check
+  Serial.print("Button state after setup: ");
+  Serial.println(buttonPressed);
+
+  if (buttonPressed) {
+    waitForSerialMessage(); // Wait for a serial message if the button is pressed
+  }
+}
+
+
 void writeCredentials(const char* ssid, const char* password) {
     EEPROM.begin(eepromSize);
     EEPROM.writeString(0, ssid);
@@ -48,14 +93,14 @@ void readCredentials() {
     EEPROM.end();
 }
 
-void setupWiFi() {
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(1000);
-        Serial.println("Connecting to WiFi...");
-    }
-    selfTopic = strdup((String(selfTopic)+WiFi.macAddress()).c_str());
-    Serial.printf(selfTopic);
+void setupWiFi(const char* ssid, const char* password) {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  selfTopic = strdup((String(selfTopic) + WiFi.macAddress()).c_str());
+  Serial.printf("Connected to WiFi. Topic: %s\n", selfTopic);
 }
 
 void connectMQTT() {
@@ -74,7 +119,8 @@ void connectMQTT() {
         }
     }
     // Publish and subscribe
-    mqttClient.publish(topic1, "Hi, I'm ESP32 ^^");
+    String helloMessage = "Connected/" + WiFi.macAddress();
+    mqttClient.publish(topic2, helloMessage.c_str());
     
     mqttClient.subscribe(selfTopic);
     mqttClient.subscribe(topic1);
@@ -106,7 +152,6 @@ void setSpeeds(int targetSpeed){
   if(targetSpeed!=100){
     for(int fan = 0 ; fan<16;fan++){
       pwm.setPWM(fan,0,targetSpeed*40);
-    
     }
   }
   else{
@@ -114,9 +159,7 @@ void setSpeeds(int targetSpeed){
       pwm.setPWM(fan,0,4096);
     }
   }
-  
 }
-
 
 void setup() {
     Serial.begin(9600);
@@ -127,10 +170,20 @@ void setup() {
     // Connect to WiFi and MQTT
     Wire.setClock(400000);
     pwm.setPWM(0,4096,0);
-    setupWiFi();
+    //checkButtonDuringSetup();
+    readCredentials(); // Read stored credentials from EEPROM
+  
+    if (strlen(storedSSID) > 0 && strlen(storedPassword) > 0) {
+      Serial.println("Stored credentials found. Connecting to WiFi...");
+      setupWiFi(storedSSID, storedPassword); // Connect to WiFi using stored credentials
+    } else {
+      setupWiFi(ssid, password);
+    }
+    
     connectMQTT();
     mqttClient.setCallback(messageReceivedCallback);
     // Create task for fan control
+    
     xTaskCreatePinnedToCore(
         fanControlFunction,
         "fanControlTask",
@@ -177,31 +230,6 @@ void messageReceivedCallback(char* topic, byte* payload, unsigned int length) {
         } else if (message.equals("cancel")) {
             Serial.println("Received cancel command from topic2");
             pollingFrequency=2000;
-        }
-        else{
-          Serial.println("setting speed to");
-          currpower+=125;
-          Serial.println(currpower);
-          pwm.setPWM(0, 0, currpower);
-          pwm.setPWM(1, 0, currpower);
-          pwm.setPWM(2, 0, currpower);
-          pwm.setPWM(3, 0, currpower);
-        }
-    }
-    else if (strcmp(topic, topic2) == 0) {
-        // Convert payload to a String
-        int delimiterIndex = message.indexOf('/');
-        if (delimiterIndex != -1) {
-            // Extract the first part of the message (before ':')
-            String id = message.substring(0, delimiterIndex);
-            String speedToSet = message.substring(delimiterIndex+1);
-
-            // Compare first part with ESP32 MAC address
-            if (id.equals(WiFi.macAddress())) {
-                Serial.println("Message matches ESP32 MAC address:");
-                Serial.println("setting speed to");
-                Serial.println(speedToSet);
-            }
         }
     }
     if (strcmp(topic, topic3) == 0) {
