@@ -1,28 +1,27 @@
-
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <EEPROM.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
+#include <WiFiManager.h>
+#include <TaskScheduler.h>  // For task management
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
-const int eepromSize = 64;
-const int buttonPin = 33;//WiFi credentials button pin
+const int eepromSize = 128;  // Increase EEPROM size to store MQTT credentials
+const int buttonPin = 33;    // WiFi credentials button pin
+const int ledPin = LED_BUILTIN;        // Onboard LED pin (GPIO 2)
 bool buttonPressed = false;
 
-const char* ssid = "Trollis";
-const char* password = "123456789a";
-
-const char* mqttBroker = "broker.hivemq.com";
-const char* mqttUsername = "your_mqtt_username";  // If required
-const char* mqttPassword = "your_mqtt_password";  // If required
+char mqttBroker[40];
+char mqttUsername[40];
+char mqttPassword[40];
+int mqttPort = 1883;
 
 const char *selfTopic = "fanWall/wall/";
 const char *topic1 = "fanWall/wall/control";
 const char *topic2 = "fanWall/wall/status";
 const char *topic3 = "fanWall/wall/id";
-const int mqttPort = 1883;
 
 float currentSpeed = 1000.0;
 int pollingFrequency = 2000;
@@ -36,74 +35,41 @@ TaskHandle_t mqttTask;
 char storedSSID[eepromSize];
 char storedPassword[eepromSize];
 
-void waitForSerialMessage() {
-  Serial.println("Waiting for serial message...");
-  while (!Serial.available()) {
-    // Wait until a serial message is available
-  }
-  // Read the serial message
-  String serialMessage = Serial.readStringUntil('/');
-  Serial.println("Received Serial Message: " + serialMessage);
+// WiFiManager custom parameters
+WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqttBroker, 40);
+WiFiManagerParameter custom_mqtt_port("port", "mqtt port", String(mqttPort).c_str(), 6);
+WiFiManagerParameter custom_mqtt_user("user", "mqtt user", mqttUsername, 40);
+WiFiManagerParameter custom_mqtt_pass("pass", "mqtt pass", mqttPassword, 40);
+
+void saveConfigCallback() {
+  Serial.println("Saving config...");
+  strcpy(mqttBroker, custom_mqtt_server.getValue());
+  mqttPort = atoi(custom_mqtt_port.getValue());
+  strcpy(mqttUsername, custom_mqtt_user.getValue());
+  strcpy(mqttPassword, custom_mqtt_pass.getValue());
   
-  // Split the serial message into ssid and password
-  int separatorIndex = serialMessage.indexOf('/');
-  if (separatorIndex != -1) { // Check if the separator was found
-    String ssid = serialMessage.substring(0, separatorIndex);
-    String password = serialMessage.substring(separatorIndex + 1);
-    writeCredentials(ssid.c_str(), password.c_str()); // Call writeCredentials with ssid and password
-    Serial.println("Credentials written to EEPROM.");
-  } else {
-    Serial.println("Invalid serial message format.");
-  }
+  EEPROM.begin(eepromSize);
+  EEPROM.writeString(64, mqttBroker);  // Store MQTT broker
+  EEPROM.writeString(104, mqttUsername);  // Store MQTT username
+  EEPROM.writeString(144, mqttPassword);  // Store MQTT password
+  EEPROM.writeInt(184, mqttPort);  // Store MQTT port
+  EEPROM.commit();
+  EEPROM.end();
 }
 
-
-void checkButtonDuringSetup() {
-  // Check button state for a couple of seconds
-  unsigned long startTime = millis(); // Get the current time
-  while (millis() - startTime < 2000) { // Check for 2 seconds
-    if (digitalRead(buttonPin) == LOW) {
-      buttonPressed = true;
-      break; // Exit the loop if the button is pressed
-    }
-  }
-
-  // Print the button state after the check
-  Serial.print("Button state after setup: ");
-  Serial.println(buttonPressed);
-
-  if (buttonPressed) {
-    waitForSerialMessage(); // Wait for a serial message if the button is pressed
-  }
-}
-
-
-void writeCredentials(const char* ssid, const char* password) {
-    EEPROM.begin(eepromSize);
-    EEPROM.writeString(0, ssid);
-    EEPROM.writeString(strlen(ssid) + 1, password);
-    EEPROM.commit();
-    EEPROM.end();
-}
-
-void readCredentials() {
-    EEPROM.begin(eepromSize);
-    EEPROM.readString(0, storedSSID, eepromSize);
-    EEPROM.readString(strlen(storedSSID) + 1, storedPassword, eepromSize);
-    EEPROM.end();
-}
-
-void setupWiFi(const char* ssid, const char* password) {
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Connecting to WiFi...");
-  }
-  selfTopic = strdup((String(selfTopic) + WiFi.macAddress()).c_str());
-  Serial.printf("Connected to WiFi. Topic: %s\n", selfTopic);
+void readConfig() {
+  EEPROM.begin(eepromSize);
+  EEPROM.readString(64, mqttBroker, 40);
+  EEPROM.readString(104, mqttUsername, 40);
+  EEPROM.readString(144, mqttPassword, 40);
+  EEPROM.end();
+  Serial.printf("MQTT DATA");
+  Serial.printf(mqttBroker);
 }
 
 void connectMQTT() {
+    Serial.println(mqttBroker);
+    Serial.println(mqttPort);
     mqttClient.setServer(mqttBroker, mqttPort);
     mqttClient.setCallback(messageReceivedCallback);
     while (!mqttClient.connected()) {
@@ -127,6 +93,30 @@ void connectMQTT() {
     mqttClient.subscribe(topic3);
 }
 
+void setupWiFi() {
+  WiFiManager wifiManager;
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  // Set custom parameters
+  wifiManager.addParameter(&custom_mqtt_server);
+  wifiManager.addParameter(&custom_mqtt_user);
+  wifiManager.addParameter(&custom_mqtt_pass);
+
+  // Automatically connect using saved credentials,
+  // or start configuration portal if none are found
+  if (!wifiManager.autoConnect("ESP32_AP")) {
+    Serial.println("Failed to connect and hit timeout");
+    delay(3000);
+    ESP.restart();
+    delay(5000);
+  }
+
+  // If you get here you have connected to the WiFi
+  Serial.println("Connected to WiFi");
+  digitalWrite(ledPin, HIGH); // Turn on LED when WiFi is connected
+  selfTopic = strdup((String(selfTopic) + WiFi.macAddress()).c_str());
+}
+
 void fanControlFunction(void *parameter) {
     while (true) {
         // Implement fan control logic here
@@ -141,49 +131,39 @@ void mqttLoopTask(void *parameter) {
             mqttClient.loop();
         } else {
           Serial.println("disconnected");
-            connectMQTT();  // Reconnect if MQTT connection is lost
+          digitalWrite(ledPin, LOW); // Turn off LED when WiFi is disconnected
+          connectMQTT();  // Reconnect if MQTT connection is lost
+          digitalWrite(ledPin, HIGH); // Turn on LED when reconnected
         }
         Serial.println(pollingFrequency);
         delay(pollingFrequency);
     }
 }
 
-void setSpeeds(int targetSpeed){
-  if(targetSpeed!=100){
-    for(int fan = 0 ; fan<16;fan++){
-      pwm.setPWM(fan,0,targetSpeed*40);
+void setSpeeds(int targetSpeed) {
+    for (int fan = 0; fan < 16; fan++) {
+      pwm.setPWM(fan, 0, targetSpeed * 40);
     }
-  }
-  else{
-    for(int fan = 0 ; fan<16;fan++){
-      pwm.setPWM(fan,0,4096);
-    }
-  }
 }
 
 void setup() {
     Serial.begin(9600);
+    pinMode(ledPin, OUTPUT);  // Initialize LED pin as an output
+    digitalWrite(ledPin, LOW);  // Ensure LED is off initially
     pwm.begin();
 
     pwm.setOscillatorFrequency(27000000);
     pwm.setPWMFreq(250);  // This is the maximum PWM frequency
-    // Connect to WiFi and MQTT
     Wire.setClock(400000);
-    pwm.setPWM(0,4096,0);
-    //checkButtonDuringSetup();
-    readCredentials(); // Read stored credentials from EEPROM
-  
-    if (strlen(storedSSID) > 0 && strlen(storedPassword) > 0) {
-      Serial.println("Stored credentials found. Connecting to WiFi...");
-      setupWiFi(storedSSID, storedPassword); // Connect to WiFi using stored credentials
-    } else {
-      setupWiFi(ssid, password);
-    }
-    
-    connectMQTT();
+    pwm.setPWM(0, 4096, 0);
+
+    readConfig();  // Read stored WiFi and MQTT credentials from EEPROM
+    setupWiFi();  // Set up WiFi using WiFiManager
+
+    connectMQTT();  // Connect to the MQTT broker
     mqttClient.setCallback(messageReceivedCallback);
+
     // Create task for fan control
-    
     xTaskCreatePinnedToCore(
         fanControlFunction,
         "fanControlTask",
@@ -209,6 +189,7 @@ void setup() {
 void loop() {
     delay(1000);
 }
+
 void messageReceivedCallback(char* topic, byte* payload, unsigned int length) {
     Serial.print("Message received on topic: ");
     Serial.println(topic);
@@ -218,30 +199,29 @@ void messageReceivedCallback(char* topic, byte* payload, unsigned int length) {
     }
     Serial.println();
     String message = "";
-      for (int i = 0; i < length; i++) {
-          message += (char)payload[i];
-      }
-      message.trim();
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    message.trim();
     // Check if the message is from topic2 and contains "start" or "cancel"
     if (strcmp(topic, topic1) == 0) {
         if (message.equals("start")) {
             Serial.println("Received start command from topic2");
-            pollingFrequency=500;
+            pollingFrequency = 500;
         } else if (message.equals("cancel")) {
             Serial.println("Received cancel command from topic2");
-            pollingFrequency=2000;
+            pollingFrequency = 2000;
         }
     }
     if (strcmp(topic, topic3) == 0) {
         if (message.equals("get")) {
             Serial.println("Received 'get' command from topic2");
-            
             // Publish ESP32's MAC address to the same topic
             mqttClient.publish(topic3, WiFi.macAddress().c_str());
             Serial.println("Published ESP32 MAC address to topic2");
         }
     }
-    if(strcmp(topic,selfTopic)==0){
+    if (strcmp(topic, selfTopic) == 0) {
       Serial.print("speed set to: ");
       Serial.println(message);
       setSpeeds(message.toInt());
